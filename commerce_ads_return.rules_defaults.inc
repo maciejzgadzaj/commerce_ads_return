@@ -17,13 +17,17 @@ function commerce_ads_return_default_rules_configuration() {
         "PLUGIN" : "reaction rule",
         "OWNER" : "rules",
         "REQUIRES" : [ "rules", "commerce_ads_return", "commerce_return" ],
-        "ON" : { "commerce_return_update" : [] },
+        "ON" : { "commerce_return_update" : [], "commerce_return_insert" : [] },
         "IF" : [
           { "data_is" : { "data" : [ "commerce-return:status" ], "value" : "' . $commerce_ads_ws['ads_return_status'] . '" } },
-          { "NOT data_is" : {
-              "data" : [ "commerce-return-unchanged:status" ],
-              "value" : "' . $commerce_ads_ws['ads_return_status'] . '"
-            }
+          { "OR" : [
+              { "entity_is_new" : { "entity" : [ "commerce-return" ] } },
+              { "NOT data_is" : {
+                  "data" : [ "commerce-return-unchanged:status" ],
+                  "value" : "' . $commerce_ads_ws['ads_return_status'] . '"
+                }
+              }
+            ]
           }
         ],
         "DO" : [
