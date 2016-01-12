@@ -165,7 +165,7 @@ function commerce_ads_return_send_return($return) {
           $message .= $response['Comment'];
         }
 
-        watchdog('commerce_ads_return', 'There was an error created return @return_id for order @order_id in ADS: @message Full ADS response: !response', array(
+        watchdog('commerce_ads_return', 'There was an error creating return @return_id for order @order_id in ADS: @message Full ADS response: !response', array(
           '@return_id' => $return->return_id,
           '@order_id' => $order_wrapper->order_id->value(),
           '@message' => $message,
