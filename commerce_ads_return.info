@@ -1,0 +1,6 @@
+name = Commerce ADS Return
+description = Handle return with ADS shipping service.
+core = 7.x
+
+dependencies[] = commerce_ads
+dependencies[] = commerce_return

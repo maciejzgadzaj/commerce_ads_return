@@ -1,0 +1,267 @@
+<?php
+
+/**
+ * @file
+ * Extends Commerce ADS module with Return handling capabilities.
+ */
+
+/*
+ * Order doesn't need any operation with ADS WS.
+ */
+define('COMMERCE_ADS_RETURN_NOTHING_TO_DO', 0);
+
+/*
+ * Return needs to be created in ADS.
+ */
+define('COMMERCE_ADS_RETURN_TO_BE_CREATED', 1);
+
+/*
+ * Return needs to be updated from ADS.
+ */
+define('COMMERCE_ADS_RETURN_TO_BE_UPDATED', 2);
+
+/**
+ * Implements hook_menu().
+ */
+function commerce_ads_return_menu() {
+  $items = array();
+  // Return settings form.
+  $items['admin/commerce/config/commerce_ads/return'] = array(
+    'title' => 'Return',
+    'description' => 'Return settings.',
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 30,
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('commerce_ads_return_configure_form'),
+    'access arguments' => array('administer ads'),
+    'file' => 'includes/commerce_ads_return.admin.inc',
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_entity_property_info_alter().
+ */
+function commerce_ads_return_entity_property_info_alter(&$info) {
+  $info['commerce_return']['properties']['commerce_ads_return_needs_update'] = array(
+    'label' => t("Commerce ADS sequence"),
+    'description' => t("Set a proeprty in return to know if the return needs to be updated."),
+    'setter callback' => 'entity_property_verbatim_set',
+    'type' => 'integer',
+    'schema field' => 'commerce_ads_return_needs_update',
+  );
+}
+
+/**
+ * Implements hook_cron().
+ */
+function commerce_ads_return_cron() {
+  $commerce_ads_ws = variable_get('commerce_ads_ws', array());
+
+  // Send all returns to ADS.
+  if (!empty($commerce_ads_ws['ads_return_send_frequency']) && time() >= $commerce_ads_ws['ads_return_send_next_run']) {
+    $commerce_ads_ws['ads_return_send_next_run'] = time() + $commerce_ads_ws['ads_return_send_frequency'];
+    commerce_ads_return_send_all_returns();
+    variable_set('commerce_ads_ws', $commerce_ads_ws);
+  }
+
+  // Update all returns from ADS.
+  if (!empty($commerce_ads_ws['ads_return_update_frequency']) && time() >= $commerce_ads_ws['ads_return_update_next_run']) {
+    $commerce_ads_ws['ads_return_update_next_run'] = time() + $commerce_ads_ws['ads_return_update_frequency'];
+    commerce_ads_return_update_all_returns();
+    variable_set('commerce_ads_ws', $commerce_ads_ws);
+  }
+}
+
+/**
+ * Sends all new returns to ADS.
+ *
+ * @see commerce_ads_return_cron()
+ */
+function commerce_ads_return_send_all_returns() {
+  $query = new EntityFieldQuery();
+  $result = $query->entityCondition('entity_type', 'commerce_return')
+    ->propertyCondition('commerce_ads_return_needs_update', array(COMMERCE_ADS_RETURN_TO_BE_CREATED), 'IN')
+    ->execute();
+
+  if (!empty($result['commerce_return'])) {
+    $returns = entity_load('commerce_return', array_keys($result['commerce_return']));
+    foreach ($returns as $return) {
+      commerce_ads_return_send_return($return);
+    }
+  }
+}
+
+/**
+ * Sends single return to ADS.
+ *
+ * @param object $return
+ *   The commerce return to be sent to ADS.
+ *
+ * @return bool
+ *   TRUE if return was sent successfully, FALSE otherwise.
+ */
+function commerce_ads_return_send_return($return) {
+  $commerce_ads_ws = variable_get('commerce_ads_ws', array());
+
+  if (
+    !empty($return)
+    && !empty($commerce_ads_ws['ads_return_status'])
+    && $return->status == $commerce_ads_ws['ads_return_status']
+    && commerce_ads_check_login_ws()
+  ) {
+    $return_wrapper = entity_metadata_wrapper('commerce_return', $return);
+    $order_wrapper = entity_metadata_wrapper('commerce_order', $return_wrapper->commerce_order_reference->value());
+    $return_json = array(
+      'orderNumber' => $order_wrapper->order_id->value(),
+      'returnNumber' => $return_wrapper->return_id->value(),
+    );
+    $details = array();
+    foreach ($return_wrapper->commerce_return_line_items as $line_item_wrapper) {
+      if (
+        in_array($line_item_wrapper->getBundle(), commerce_product_line_item_types())
+        && in_array($line_item_wrapper->commerce_product->getBundle(), $commerce_ads_ws['ads_product_types'])
+      ) {
+        $sku = $line_item_wrapper->commerce_product->sku->value();
+        if (array_key_exists($sku, $details)) {
+          $details[$sku]->expectedQuantity += $line_item_wrapper->quantity->value();
+        }
+        else {
+          $details[$sku] = new stdClass();
+          $details[$sku]->productRef = $sku;
+          $details[$sku]->expectedQuantity = (int) $line_item_wrapper->quantity->value();
+        }
+      }
+    }
+
+    // Send the return only if we have product to send.
+    if (!empty($details)) {
+      $return_json['detail'] = array_values($details);
+      $options = array(
+        'method' => 'POST',
+        'data' => drupal_json_encode($return_json),
+        'headers' => array(
+          'Content-Type' => 'application/json',
+          'Accept' => 'application/json',
+        ),
+      );
+
+      $response = commerce_ads_request_ads('api/Returns/create', $options);
+
+      if ($response['Code'] === 0) {
+        // Return was sent to ADS successfully, now it will need to be updated.
+        $return->commerce_ads_return_needs_update = COMMERCE_ADS_RETURN_TO_BE_UPDATED;
+        commerce_return_save($return);
+
+        watchdog('commerce_ads_return', 'Return @return_id for order @order_id successfully created in ADS.', array(
+          '@return_id' => $return->return_id,
+          '@order_id' => $order_wrapper->order_id->value(),
+        ));
+      }
+      else {
+        $message = '';
+        if (!empty($response['Comment'])) {
+          $message .= $response['Comment'];
+        }
+
+        watchdog('commerce_ads_return', 'There was an error created return @return_id for order @order_id in ADS: @message Full ADS response: !response', array(
+          '@return_id' => $return->return_id,
+          '@order_id' => $order_wrapper->order_id->value(),
+          '@message' => $message,
+          '!response' => '<pre>' . var_export($response, TRUE) . '</pre>',
+        ), WATCHDOG_ERROR);
+      }
+
+      return $response['Code'] === 0;
+    }
+  }
+}
+
+/**
+ * Updates all returns from ADS.
+ *
+ * (It doesn't actually update all the returns, just those that have the
+ * 'commerce_ads_return_needs_update' set to COMMERCE_ADS_RETURN_TO_BE_UPDATED,
+ * and their status is not one of the non-updateable statuses.)
+ *
+ * @see commerce_ads_return_cron()
+ * @see commerce_ads_return_configure_form()
+ */
+function commerce_ads_return_update_all_returns() {
+  $commerce_ads_ws = variable_get('commerce_ads_ws', array());
+
+  $query = new EntityFieldQuery();
+  $query->entityCondition('entity_type', 'commerce_return')
+    ->propertyCondition('commerce_ads_return_needs_update', array(COMMERCE_ADS_RETURN_TO_BE_UPDATED), 'IN');
+
+  // Don't update returns that don't need it anymore.
+  if (!empty($commerce_ads_ws['ads_return_update_end'])) {
+    $query->propertyCondition('status', $commerce_ads_ws['ads_return_update_end'], 'NOT IN');
+  }
+
+  $result = $query->execute();
+  if (!empty($result['commerce_return'])) {
+    $returns = entity_load('commerce_return', array_keys($result['commerce_return']));
+    foreach ($returns as $return) {
+      commerce_ads_return_update_return($return);
+    }
+  }
+}
+
+/**
+ * Updates commerce return status from ADS.
+ *
+ * @param object $return
+ *   The return to update.
+ *
+ * @return array
+ *  The queue item status.
+ */
+function commerce_ads_return_update_return($return) {
+  $commerce_ads_ws = variable_get('commerce_ads_ws', array());
+
+  $return_wrapper = entity_metadata_wrapper('commerce_return', $return);
+  $order = $return_wrapper->commerce_order_reference->value();
+
+  $response = commerce_ads_request_ads('api/Returns/get?returnNumber=' . $return->return_id);
+
+  if (
+    $response['Code'] === 0
+    && $response['Data']['orderNumber'] == $order->order_id
+    && !empty($response['Data']['state'])
+    && !empty($commerce_ads_ws['ads_return_statuses'][$response['Data']['state']])
+  ) {
+    $return->status = $commerce_ads_ws['ads_return_statuses'][$response['Data']['state']];
+
+    // If return status is one of final statuses (no longer needing any more
+    // updates), mark it as so.
+    if (in_array($return->status, $commerce_ads_ws['ads_return_update_end'])) {
+      $return->commerce_ads_return_needs_update = COMMERCE_ADS_RETURN_NOTHING_TO_DO;
+    }
+
+    commerce_return_save($return);
+
+    watchdog('commerce_ads_return', 'Return @return_id for order @order_id updated from ADS to @status.', array(
+      '@return_id' => $return->return_id,
+      '@order_id' => $response['Data']['orderNumber'],
+      '@status' => $response['Data']['state'],
+    ));
+  }
+  else {
+    $message = '';
+    if (!empty($response['Comment'])) {
+      $message .= $response['Comment'];
+    }
+    if ($response['Data']['orderNumber'] != $order->order_id) {
+      $message .= 'Order ID mismatch.';
+    }
+
+    watchdog('commerce_ads_return', 'There was an error updating return @return_id for order @order_id from ADS: @message Full ADS response: !response', array(
+      '@return_id' => $return->return_id,
+      '@order_id' => $order->order_id,
+      '@message' => $message,
+      '!response' => '<pre>' . var_export($response, TRUE) . '</pre>',
+    ), WATCHDOG_ERROR);
+  }
+}

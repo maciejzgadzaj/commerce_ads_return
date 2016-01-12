@@ -1,0 +1,65 @@
+<?php
+
+/**
+ * @file
+ * Installation and schema callbacks for the Commerce ADS Return module.
+ */
+
+/**
+ * Implements hook_install().
+ */
+function commerce_ads_return_install() {
+  db_add_field('commerce_return', 'commerce_ads_return_needs_update', commerce_ads_return_schema_field());
+
+  // Set default return-related ADS configuration.
+  commerce_ads_return_default_settings();
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function commerce_ads_return_uninstall() {
+  db_drop_field('commerce_return', 'commerce_ads_return_needs_update');
+}
+
+/**
+ * Implements hook_schema_alter().
+ */
+function commerce_ads_return_schema_alter(&$schema) {
+  $schema['commerce_return']['fields']['commerce_ads_return_needs_update'] = commerce_ads_return_schema_field();
+}
+
+/**
+ * Adds commerce_ads_return_needs_update property to commerce_return.
+ */
+function commerce_ads_return_update_7000() {
+  db_add_field('commerce_return', 'commerce_ads_return_needs_update', commerce_ads_return_schema_field());
+
+  // Set default return-related ADS configuration.
+  commerce_ads_return_default_settings();
+}
+
+/**
+ * Returns an additional field definition for 'commerce_return' schema.
+ *
+ * @return array
+ *   An additional field definition for 'commerce_return' schema.
+ */
+function commerce_ads_return_schema_field() {
+  return array(
+    'type' => 'int',
+    'not null' => TRUE,
+    'default' => COMMERCE_ADS_RETURN_TO_BE_CREATED,
+    'description' => 'An integer indicating whether a return needs to be updated.',
+  );
+}
+
+/**
+ * Sets default return-related ADS configuration.
+ */
+function commerce_ads_return_default_settings() {
+  $commerce_ads_ws = variable_get('commerce_ads_ws', array());
+  $commerce_ads_ws['ads_return_send_next_run'] = 0;
+  $commerce_ads_ws['ads_return_update_next_run'] = 0;
+  variable_set('commerce_ads_ws', $commerce_ads_ws);
+}
